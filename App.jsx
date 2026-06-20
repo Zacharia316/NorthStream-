@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 /* ---------------------------------------------------------
    NORTHSTREAM — Home Screen Demo
@@ -8,30 +8,96 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 
 const CATEGORIES = ["All", "Sports", "News", "Movies", "Kids", "Music", "Docs"];
 
-const FEATURED = [
-  { id: "f1", name: "Arctic Sports One", category: "Sports", tag: "LIVE", hue: "#1F6F5C" },
-  { id: "f2", name: "Polar News 24", category: "News", tag: "LIVE", hue: "#1B2A4A" },
-  { id: "f3", name: "Borealis Kids", category: "Kids", tag: "NEW", hue: "#2D4A3E" },
-  { id: "f4", name: "Frostline Cinema", category: "Movies", tag: "LIVE", hue: "#0F3D3E" },
-  { id: "f5", name: "Tundra Beats", category: "Music", tag: "LIVE", hue: "#26392E" },
-];
+const DEFAULT_M3U_INDEX = "https://iptv-org.github.io/iptv/index.m3u";
+const PROXY_BASE = ""; // paste your Pterodactyl server's public URL here once deployed, e.g. "https://abc123.ploud.co:25565"
 
-const CHANNELS = [
-  { id: "c1", name: "Arctic Sports One", category: "Sports", country: "Norway", quality: "1080p", geoBlocked: false, alwaysOn: true },
-  { id: "c2", name: "Arctic Sports Two", category: "Sports", country: "Sweden", quality: "720p", geoBlocked: true, alwaysOn: true },
-  { id: "c3", name: "Glacier Football", category: "Sports", country: "Iceland", quality: "1080p", geoBlocked: false, alwaysOn: false },
-  { id: "c4", name: "Polar News 24", category: "News", country: "Norway", quality: "1080p", geoBlocked: false, alwaysOn: true },
-  { id: "c5", name: "Northbound News", category: "News", country: "Finland", quality: "480p", geoBlocked: false, alwaysOn: true },
-  { id: "c6", name: "Frostline Cinema", category: "Movies", country: "Canada", quality: "1080p", geoBlocked: true, alwaysOn: false },
-  { id: "c7", name: "Midnight Sun Films", category: "Movies", country: "Sweden", quality: "720p", geoBlocked: false, alwaysOn: false },
-  { id: "c8", name: "Borealis Kids", category: "Kids", country: "Denmark", quality: "720p", geoBlocked: false, alwaysOn: true },
-  { id: "c9", name: "Aurora Toons", category: "Kids", country: "Norway", quality: "480p", geoBlocked: false, alwaysOn: true },
-  { id: "c10", name: "Tundra Beats", category: "Music", country: "Iceland", quality: "1080p", geoBlocked: false, alwaysOn: true },
-  { id: "c11", name: "Fjord Sessions", category: "Music", country: "Norway", quality: "720p", geoBlocked: true, alwaysOn: false },
-  { id: "c12", name: "Glacier Docs", category: "Docs", country: "Finland", quality: "1080p", geoBlocked: false, alwaysOn: false },
-  { id: "c13", name: "Permafrost Nature", category: "Docs", country: "Canada", quality: "720p", geoBlocked: false, alwaysOn: true },
-  { id: "c14", name: "Lichen Wildlife", category: "Docs", country: "Sweden", quality: "480p", geoBlocked: true, alwaysOn: false },
-];
+const CATEGORY_MAP = {
+  sport: "Sports", news: "News", movie: "Movies", film: "Movies",
+  kids: "Kids", cartoon: "Kids", music: "Music",
+  documentary: "Docs", science: "Docs", nature: "Docs",
+};
+function normalizeCategory(group) {
+  const g = (group || "").toLowerCase();
+  for (const key of Object.keys(CATEGORY_MAP)) {
+    if (g.includes(key)) return CATEGORY_MAP[key];
+  }
+  return "Movies" in CATEGORIES ? "Movies" : "News";
+}
+
+const HUES = ["#1F6F5C", "#1B2A4A", "#2D4A3E", "#0F3D3E", "#26392E", "#33304A"];
+
+function parseM3U(raw) {
+  const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
+  const out = [];
+  let meta = {};
+  let idx = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith("#EXTINF")) {
+      const nameMatch = line.match(/,(.+)$/);
+      const groupMatch = line.match(/group-title="([^"]*)"/i);
+      const countryMatch = line.match(/tvg-country="([^"]*)"/i);
+      meta = {
+        name: nameMatch ? nameMatch[1].trim() : "Unknown channel",
+        rawGroup: groupMatch ? groupMatch[1].trim() : "General",
+        country: countryMatch ? countryMatch[1].trim() : "—",
+      };
+    } else if (line.startsWith("http") && meta.name) {
+      idx += 1;
+      const category = normalizeCategory(meta.rawGroup);
+      out.push({
+        id: `m-${idx}`,
+        name: meta.name,
+        category: CATEGORIES.includes(category) ? category : "Movies",
+        country: meta.country,
+        quality: "Auto",
+        geoBlocked: false,
+        alwaysOn: true,
+        url: line,
+      });
+      meta = {};
+    }
+  }
+  return out;
+}
+
+async function fetchAndParsePlaylist(sourceUrl) {
+  const target = PROXY_BASE
+    ? `${PROXY_BASE}/m3u-proxy?url=${encodeURIComponent(sourceUrl)}`
+    : sourceUrl;
+  const res = await fetch(target, { signal: AbortSignal.timeout(15000) });
+  if (!res.ok) throw new Error("Playlist unreachable");
+  const text = await res.text();
+  if (!text.includes("#EXTM3U")) throw new Error("Not a valid M3U playlist");
+  const channels = parseM3U(text);
+  if (channels.length === 0) throw new Error("No channels found in playlist");
+  return channels;
+}
+
+function buildFeatured(channels) {
+  const seen = new Set();
+  const picks = [];
+  for (const ch of channels) {
+    if (seen.has(ch.category)) continue;
+    seen.add(ch.category);
+    picks.push(ch);
+    if (picks.length >= 5) break;
+  }
+  return picks.map((ch, i) => ({
+    id: ch.id,
+    name: ch.name,
+    category: ch.category,
+    tag: "LIVE",
+    hue: HUES[i % HUES.length],
+  }));
+}
+
+function streamUrlFor(channel) {
+  if (!channel?.url) return null;
+  return PROXY_BASE
+    ? `${PROXY_BASE}/segment-proxy?url=${encodeURIComponent(channel.url)}`
+    : channel.url;
+}
 
 function groupByCategory(channels) {
   const groups = {};
@@ -278,11 +344,19 @@ export default function NorthStreamHome() {
   const dragStartY = useRef(null);
 
   const [screen, setScreen] = useState("home"); // home | guide | favorites | settings
-  const [favorites, setFavorites] = useState(() => new Set(["c1", "c4", "c8"])); // seeded for demo
+  const [favorites, setFavorites] = useState(() => new Set());
+
+  const [channels, setChannels] = useState([]);
+  const [channelsLoading, setChannelsLoading] = useState(true);
+  const [channelsError, setChannelsError] = useState("");
 
   const [playlistUrl, setPlaylistUrl] = useState(""); // custom M3U source, empty = built-in channels
   const [playlistDraft, setPlaylistDraft] = useState("");
   const [playlistStatus, setPlaylistStatus] = useState("idle"); // idle | loading | active | error
+
+  const videoRef = useRef(null);
+  const hlsRef = useRef(null);
+  const [playerError, setPlayerError] = useState(false);
 
   const toggleFavorite = (id) => {
     setFavorites((prev) => {
@@ -295,42 +369,118 @@ export default function NorthStreamHome() {
 
   const retryStream = () => {
     setIsRetrying(true);
+    setPlayerError(false);
     setIsPlaying(false);
     setTimeout(() => {
+      attachStream(activeChannel);
       setIsRetrying(false);
-      setIsPlaying(true);
-    }, 1200);
+    }, 600);
   };
 
   const loadPlaylist = () => {
     const url = playlistDraft.trim();
     if (!url) return;
     setPlaylistStatus("loading");
-    // Demo only — real version will fetch + parse the M3U and replace CHANNELS.
-    setTimeout(() => {
-      const looksValid = /\.m3u8?($|\?)/i.test(url) || url.startsWith("http");
-      if (looksValid) {
+    fetchAndParsePlaylist(url)
+      .then((parsed) => {
+        setChannels(parsed);
         setPlaylistUrl(url);
         setPlaylistStatus("active");
-      } else {
-        setPlaylistStatus("error");
-      }
-    }, 900);
+      })
+      .catch(() => setPlaylistStatus("error"));
   };
 
   const clearPlaylist = () => {
     setPlaylistUrl("");
     setPlaylistDraft("");
     setPlaylistStatus("idle");
+    setChannelsLoading(true);
+    fetchAndParsePlaylist(DEFAULT_M3U_INDEX)
+      .then(setChannels)
+      .catch(() => setChannelsError("Could not reach the channel index."))
+      .finally(() => setChannelsLoading(false));
   };
+
+  /* ---- Initial channel load ---- */
+  useEffect(() => {
+    fetchAndParsePlaylist(DEFAULT_M3U_INDEX)
+      .then(setChannels)
+      .catch(() => setChannelsError("Could not reach the channel index. Try again shortly."))
+      .finally(() => setChannelsLoading(false));
+  }, []);
+
+  /* ---- Real HLS playback, tied to activeChannel + isPlaying ---- */
+  const attachStream = useCallback((channel) => {
+    const video = videoRef.current;
+    const src = streamUrlFor(channel);
+    if (!video || !src) return;
+
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
+    setPlayerError(false);
+
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = src;
+      video.play().catch(() => {});
+      return;
+    }
+
+    import("hls.js").then(({ default: Hls }) => {
+      if (!Hls.isSupported()) {
+        setPlayerError(true);
+        return;
+      }
+      const hls = new Hls({
+        enableWorker: true,
+        startLevel: -1,
+        abrEwmaDefaultEstimate: 500000,
+        fragLoadingMaxRetry: 4,
+        manifestLoadingMaxRetry: 4,
+        fragLoadingTimeOut: 8000,
+        manifestLoadingTimeOut: 8000,
+      });
+      hlsRef.current = hls;
+      hls.loadSource(src);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (!data.fatal) return;
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+        else setPlayerError(true);
+      });
+    }).catch(() => setPlayerError(true));
+  }, []);
+
+  useEffect(() => {
+    if (activeChannel) attachStream(activeChannel);
+    return () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+    };
+  }, [activeChannel, attachStream]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (isPlaying) video.play().catch(() => {});
+    else video.pause();
+  }, [isPlaying]);
+
+  const FEATURED = useMemo(() => buildFeatured(channels), [channels]);
 
   /* ---- Hero auto-scroll: 3 seconds ---- */
   useEffect(() => {
+    if (FEATURED.length === 0) return;
     heroTimerRef.current = setInterval(() => {
       setHeroIndex((i) => (i + 1) % FEATURED.length);
     }, 3000);
     return () => clearInterval(heroTimerRef.current);
-  }, []);
+  }, [FEATURED.length]);
 
   const pauseHeroAutoScroll = useCallback(() => {
     clearInterval(heroTimerRef.current);
@@ -338,10 +488,11 @@ export default function NorthStreamHome() {
 
   const resumeHeroAutoScroll = useCallback(() => {
     clearInterval(heroTimerRef.current);
+    if (FEATURED.length === 0) return;
     heroTimerRef.current = setInterval(() => {
       setHeroIndex((i) => (i + 1) % FEATURED.length);
     }, 3000);
-  }, []);
+  }, [FEATURED.length]);
 
   /* ---- Player controls ---- */
   const openChannel = (channel) => {
@@ -378,22 +529,22 @@ export default function NorthStreamHome() {
     dragStartY.current = null;
   };
 
-  const filteredChannels = CHANNELS.filter((ch) => {
+  const filteredChannels = channels.filter((ch) => {
     const matchesCategory = activeCategory === "All" || ch.category === activeCategory;
     const matchesSearch = ch.name.toLowerCase().includes(searchQuery.toLowerCase());
     return matchesCategory && matchesSearch;
   });
 
   const searchResults = searchQuery.trim()
-    ? CHANNELS.filter((ch) => ch.name.toLowerCase().includes(searchQuery.toLowerCase()))
+    ? channels.filter((ch) => ch.name.toLowerCase().includes(searchQuery.toLowerCase()))
     : [];
 
   const grouped = groupByCategory(
-    activeCategory === "All" ? CHANNELS : CHANNELS.filter((c) => c.category === activeCategory)
+    activeCategory === "All" ? channels : channels.filter((c) => c.category === activeCategory)
   );
 
   const playerVisible = playerState !== "closed";
-  const hero = FEATURED[heroIndex];
+  const hero = FEATURED.length > 0 ? FEATURED[heroIndex % FEATURED.length] : null;
 
   return (
     <div
@@ -421,6 +572,40 @@ export default function NorthStreamHome() {
         button { font-family: inherit; cursor: pointer; }
         input { font-family: inherit; }
       `}</style>
+
+      {/* ---------------- VIDEO ELEMENT (persists across mini/full) ---------------- */}
+      {playerVisible && activeChannel && (
+        <video
+          ref={videoRef}
+          playsInline
+          muted={false}
+          style={{
+            position: playerState === "full" ? "absolute" : "fixed",
+            top: playerState === "mini" ? "-9999px" : 0,
+            left: 0,
+            width: "100%",
+            aspectRatio: "16 / 9",
+            background: "#000",
+            zIndex: playerState === "full" ? 1 : -1,
+            objectFit: "contain",
+          }}
+        />
+      )}
+      {playerError && playerVisible && (
+        <div
+          style={{
+            position: "fixed",
+            top: playerState === "mini" ? 8 : "auto",
+            left: 0,
+            right: 0,
+            textAlign: "center",
+            fontSize: "11px",
+            color: "#FF6B5E",
+            zIndex: 400,
+            pointerEvents: "none",
+          }}
+        />
+      )}
 
       {/* ---------------- MINI PLAYER (sticky top) ---------------- */}
       {playerVisible && playerState === "mini" && activeChannel && (
@@ -555,7 +740,7 @@ export default function NorthStreamHome() {
             style={{
               width: "100%",
               aspectRatio: "16 / 9",
-              background: `radial-gradient(ellipse at top, ${t.accentDim}, ${t.bgElevated} 70%)`,
+              background: "#000",
               position: isLocked ? "sticky" : "relative",
               top: 0,
               zIndex: 5,
@@ -564,8 +749,31 @@ export default function NorthStreamHome() {
               justifyContent: "center",
               flexShrink: 0,
               cursor: "pointer",
+              overflow: "hidden",
             }}
           >
+            {playerError && (
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: "8px",
+                  color: t.textDim,
+                  background: `radial-gradient(ellipse at top, ${t.accentDim}, ${t.bgElevated} 70%)`,
+                  zIndex: 2,
+                }}
+              >
+                <IconAlertTriangle width="22" height="22" />
+                <span style={{ fontSize: "13px", fontWeight: 600, color: t.text }}>Signal lost</span>
+                <span style={{ fontSize: "11px", maxWidth: "220px", textAlign: "center" }}>
+                  Channel may be offline or temporarily unreachable
+                </span>
+              </div>
+            )}
             {/* Top overlay row: collapse, live badge, lock, close */}
             <div
               style={{
@@ -685,23 +893,25 @@ export default function NorthStreamHome() {
               {isPlaying ? <IconPause width="22" height="22" /> : <IconPlay width="22" height="22" />}
             </button>
 
-            {/* Progress bar */}
-            <div
-              style={{
-                position: "absolute",
-                bottom: "16px",
-                left: "16px",
-                right: "16px",
-                height: "3px",
-                background: t.border,
-                borderRadius: "2px",
-                overflow: "hidden",
-                opacity: controlsVisible ? 1 : 0,
-                transition: "opacity 0.2s ease",
-              }}
-            >
-              <div style={{ width: "38%", height: "100%", background: t.accent }} />
-            </div>
+            {/* Buffering / live indicator */}
+            {isRetrying && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: "16px",
+                  left: "16px",
+                  right: "16px",
+                  textAlign: "center",
+                  fontSize: "11px",
+                  color: t.accent,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  opacity: controlsVisible ? 1 : 0,
+                  transition: "opacity 0.2s ease",
+                }}
+              >
+                RECONNECTING…
+              </div>
+            )}
 
             {/* Small persistent lock indicator when controls are hidden, so it's still reachable */}
             {!controlsVisible && isLocked && (
@@ -810,7 +1020,7 @@ export default function NorthStreamHome() {
                   gap: "10px",
                 }}
               >
-                {CHANNELS.filter((c) => c.category === activeChannel.category && c.id !== activeChannel.id).map((c) => (
+                {channels.filter((c) => c.category === activeChannel.category && c.id !== activeChannel.id).map((c) => (
                   <ChannelCard
                     key={c.id}
                     channel={c}
@@ -972,13 +1182,14 @@ export default function NorthStreamHome() {
       </header>
 
       {/* ---------------- HERO: auto-scrolling featured rail (3s) ---------------- */}
+      {hero && (
       <section style={{ padding: "0 16px 28px" }}>
         <div
           onTouchStart={pauseHeroAutoScroll}
           onTouchEnd={resumeHeroAutoScroll}
           onMouseEnter={pauseHeroAutoScroll}
           onMouseLeave={resumeHeroAutoScroll}
-          onClick={() => openChannel(CHANNELS.find((c) => c.name === hero.name) || CHANNELS[0])}
+          onClick={() => openChannel(channels.find((c) => c.name === hero.name) || channels[0])}
           style={{
             position: "relative",
             width: "100%",
@@ -1058,10 +1269,19 @@ export default function NorthStreamHome() {
           </div>
         </div>
       </section>
+      )}
 
       {/* ---------------- CHANNEL RAILS ---------------- */}
       <main style={{ padding: "0 16px 100px" }}>
-        {Object.keys(grouped).length === 0 ? (
+        {channelsLoading ? (
+          <div style={{ textAlign: "center", padding: "40px 0", color: t.textDim, fontSize: "14px" }}>
+            Scanning for channels…
+          </div>
+        ) : channelsError ? (
+          <div style={{ textAlign: "center", padding: "40px 0", color: "#FF6B5E", fontSize: "14px" }}>
+            {channelsError}
+          </div>
+        ) : Object.keys(grouped).length === 0 ? (
           <div style={{ textAlign: "center", padding: "40px 0", color: t.textDim, fontSize: "14px" }}>
             No channels found
           </div>
@@ -1095,7 +1315,7 @@ export default function NorthStreamHome() {
       {screen === "guide" && (
         <GuideScreen
           t={t}
-          channels={CHANNELS.filter((c) => favorites.has(c.id))}
+          channels={channels.filter((c) => favorites.has(c.id))}
           onOpenChannel={openChannel}
         />
       )}
@@ -1104,7 +1324,7 @@ export default function NorthStreamHome() {
       {screen === "favorites" && (
         <FavoritesScreen
           t={t}
-          channels={CHANNELS.filter((c) => favorites.has(c.id))}
+          channels={channels.filter((c) => favorites.has(c.id))}
           onOpenChannel={openChannel}
           onToggleFavorite={toggleFavorite}
         />
