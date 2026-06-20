@@ -9,7 +9,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 const CATEGORIES = ["All", "Sports", "News", "Movies", "Kids", "Music", "Docs"];
 
 const DEFAULT_M3U_INDEX = "https://iptv-org.github.io/iptv/index.m3u";
-const PROXY_BASE = ""; // paste your Pterodactyl server's public URL here once deployed, e.g. "https://abc123.ploud.co:25565"
+const PROXY_BASE = "http://panel.bwmxmd.co.ke:25039"; // paste your Pterodactyl server's public URL here once deployed, e.g. "https://abc123.ploud.co:25565"
 
 const CATEGORY_MAP = {
   sport: "Sports", news: "News", movie: "Movies", film: "Movies",
